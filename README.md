@@ -66,7 +66,21 @@ export QIANFAN_MODELS='[{"id":"ernie-4.5-turbo-128k","thinking":true},{"id":"dee
 | `QIANFAN_RATE_LIMIT_RPM` | 每分钟请求上限 | 不限制 |
 | `QIANFAN_RATE_LIMIT_CONCURRENCY` | 最大并发请求数 | 不限制 |
 | `QIANFAN_RATE_LIMIT_IDLE_TIMEOUT_MS` | 空闲超时（毫秒） | 300000 |
+注：最好做限制，不然容易超出限制导致中断
+个人配置如下：
+```
+# Tokens-per-minute quota (0 or unset → disabled)
+QIANFAN_RATE_LIMIT_TPM=300000
 
+# Requests-per-minute quota (0 or unset → disabled)
+QIANFAN_RATE_LIMIT_RPM=100
+
+# Safety margin 0–1. Effective limit = quota × (1 − margin). Default 0.15
+QIANFAN_RATE_LIMIT_SAFETY_MARGIN=0.15
+
+# Minimum interval between consecutive requests (ms). Default 200
+QIANFAN_RATE_LIMIT_MIN_INTERVAL_MS=200
+```
 ## 从源码构建
 
 如需自行修改并重新构建：
