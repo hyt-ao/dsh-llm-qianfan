@@ -16,7 +16,7 @@
 ### 方式一：从 GitHub 安装（推荐，零编译）
 
 ```bash
-dsh plugin add github:你的用户名/dsh-llm-qianfan
+dsh plugin add github:hyt-ao/dsh-llm-qianfan
 ```
 
 > 仓库已包含预构建的 `lib/` 目录，克隆后无需编译，无需配置 `allowBuilds`。
@@ -24,7 +24,7 @@ dsh plugin add github:你的用户名/dsh-llm-qianfan
 ### 方式二：克隆后本地安装
 
 ```bash
-git clone https://github.com/你的用户名/dsh-llm-qianfan.git
+git clone https://github.com/hyt-ao/dsh-llm-qianfan.git
 dsh plugin add ./dsh-llm-qianfan
 ```
 
