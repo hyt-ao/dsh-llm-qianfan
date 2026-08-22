@@ -432,14 +432,7 @@ window.__ModuleLoader__.load({
           e('label', null, '控制台 Cookie（必填：DevTools → Network → tokenPlanPersonal/resource 请求 → 复制 Cookie 请求头全部内容）'),
           e('textarea', { className: 'qf-input qf-textarea', value: cookie, placeholder: '粘贴 Cookie…', onChange: (ev) => setCookie(ev.target.value) }),
         ]),
-        e('div', { className: 'qf-field' }, [
-          e('label', null, 'Referer（可选，默认官方页面）'),
-          e('input', { className: 'qf-input', value: referer, onChange: (ev) => setReferer(ev.target.value) }),
-        ]),
-        e('div', { className: 'qf-field' }, [
-          e('label', null, 'User-Agent（可选）'),
-          e('input', { className: 'qf-input', value: ua, onChange: (ev) => setUa(ev.target.value) }),
-        ]),
+        // Referer / User-Agent 隐藏：默认值已适配官方控制台，高级用户可手动编辑 qianfan-tokenplan.json。
         e('div', { className: 'qf-field' }, [
           e('label', null, '自动刷新间隔（分钟，默认 15）'),
           e('input', { className: 'qf-input', value: minutes, onChange: (ev) => setMinutes(ev.target.value) }),
@@ -459,7 +452,9 @@ window.__ModuleLoader__.load({
         e('p', { className: 'qf-note2' }, [
           '控制千帆适配器的客户端限流器（令牌桶）。设置后即时生效，无需重启。', e('br', null),
           '留空 = 不修改当前值；全部填 0 = 禁用限流。环境变量 ', e('span', { className: 'qf-q' }, 'QIANFAN_RATE_LIMIT_*'),
-          ' 作为兜底默认值。',
+          ' 作为兜底默认值。', e('br', null),
+          '推荐值：TPM ≤ ', e('strong', null, '1000000'), '，RPM ≤ ', e('strong', null, '60'),
+          '（千帆模型最大推荐限制，超出可能被服务端中断）。',
         ]),
         e('div', { className: 'qf-field' }, [
           e('label', null, 'TPM（每分钟 token 上限，如 500000）'),
