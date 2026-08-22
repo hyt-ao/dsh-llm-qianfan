@@ -1,0 +1,36 @@
+{
+  "name": "dsh-qianfan-tokenplan",
+  "version": "0.1.0",
+  "description": "百度千帆 Token Plan 个人版套餐余量卡片：在 DSH 侧边栏显示套餐类型、剩余 token/总量、重置时间与剩余百分比。通过千帆控制台「我的订阅」接口（Cookie 认证）获取真实余量数据。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./typert": {
+      "default": "./lib/typert.host.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/dsh-credentials": "^0.0.1-rc.1",
+    "zod": "^4.0.0"
+  }
+}

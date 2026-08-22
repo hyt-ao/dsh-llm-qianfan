@@ -4,10 +4,12 @@ import {
   attributionHeaders,
   LlmAdapter,
   LlmError,
+  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
+  LlmModelReasoningInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
   ResolvedRetryPolicy,
@@ -18,14 +20,21 @@ import { serializeRequest } from './serialize.ts'
 import { parseSse } from './client.ts'
 import { translate } from './translate.ts'
 import { QianfanRateLimiter } from './rate-limiter.ts'
+import type { RateLimiterConfig } from './rate-limiter.ts'
 import type {
   QianfanAdapterOptions,
   QianfanCatalogModel,
   QianfanConnectionOptions,
+  QianfanDefaultReasoning,
   WireError,
 } from './types.ts'
 
-export type { QianfanAdapterOptions, QianfanCatalogModel, QianfanConnectionOptions }
+export type {
+  QianfanAdapterOptions,
+  QianfanCatalogModel,
+  QianfanConnectionOptions,
+  QianfanDefaultReasoning,
+}
 
 export const DEFAULT_CONTEXT_WINDOW = 128_000
 export const DEFAULT_MAX_TOKENS = 8_192
@@ -35,6 +44,21 @@ const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /** Qianfan-specific error codes that indicate rate limiting. */
 const QIANFAN_RATE_LIMIT_CODES = new Set([336502, 18])
+
+/** Structural equality for rate-limit configs (avoids rebuilding on every request). */
+function sameRateLimitConfig(
+  a: RateLimiterConfig | undefined,
+  b: RateLimiterConfig | undefined,
+): boolean {
+  if (a === b) return true
+  if (a === undefined || b === undefined) return false
+  return (
+    a.tpm === b.tpm &&
+    a.rpm === b.rpm &&
+    a.safetyMargin === b.safetyMargin &&
+    a.minIntervalMs === b.minIntervalMs
+  )
+}
 
 function modelInfo(provider: string, model: QianfanCatalogModel): LlmModelInfo {
   return {
@@ -46,6 +70,67 @@ function modelInfo(provider: string, model: QianfanCatalogModel): LlmModelInfo {
   }
 }
 
+/** "off" is the canonical disabled-thinking level id used across DSH adapters. */
+const OFF_LEVEL = 'off'
+
+/**
+ * Build the reasoning-effort metadata the DSH catalog projection reads to
+ * render the model picker's effort menu, from a model's `reasoningEfforts`
+ * declaration and the provider's configured default level.
+ *
+ * The declaration maps level id → wire value (`off: null` disables thinking,
+ * `high`/`max` pass through to the API's `reasoning_effort` parameter).
+ * Only levels with a usable wire value are surfaced; `false` (explicit
+ * opt-out) and absent declarations expose no menu at all.
+ *
+ * @param model - the resolved catalog model (may be a plain object shape).
+ * @param defaultLevel - the provider-level default effort id, if any.
+ * @returns the reasoning metadata (or undefined when none can be offered).
+ */
+function reasoningOf(
+  model: QianfanCatalogModel | undefined,
+  defaultLevel: QianfanDefaultReasoning,
+): LlmModelReasoningInfo | undefined {
+  const efforts = model?.reasoningEfforts
+  if (efforts === undefined || efforts === null) return undefined
+  if (efforts === false || typeof efforts !== 'object') return undefined
+
+  const levels: Array<{ id: string; name: string }> = []
+  for (const [id, wire] of Object.entries(efforts)) {
+    if (id === OFF_LEVEL && wire === null) {
+      levels.push({ id: OFF_LEVEL, name: 'Off' })
+      continue
+    }
+    if (typeof wire !== 'string' || wire.length === 0) continue
+    levels.push({ id, name: `${id.charAt(0).toUpperCase()}${id.slice(1)}` })
+  }
+  if (levels.length === 0) return undefined
+
+  const hasDefault =
+    typeof defaultLevel === 'string' &&
+    levels.some((level) => level.id === defaultLevel)
+  return {
+    efforts: levels.map((level) => ({
+      id: ReasoningEffortId(level.id),
+      name: level.name,
+    })),
+    ...(hasDefault ? { defaultEffort: ReasoningEffortId(defaultLevel) } : {}),
+  }
+}
+
+/**
+ * Map an effort id to the wire value the Qianfan API expects.
+ * `off` disables thinking; any other level id passes through as the API's
+ * `reasoning_effort` parameter (the API validates low/medium/high/max/…).
+ */
+export function effortToWire(
+  effort: string | undefined,
+): { reasoningEffort?: string; thinkingDisabled?: boolean } {
+  if (effort === undefined) return {}
+  if (effort === OFF_LEVEL) return { thinkingDisabled: true }
+  return { reasoningEffort: effort }
+}
+
 function httpErrorCode(status: number, error?: WireError['error']): string {
   if (status === 401 || status === 403) return 'AUTH'
   if (status === 429) return 'RATE_LIMIT'
@@ -55,15 +140,28 @@ function httpErrorCode(status: number, error?: WireError['error']): string {
 }
 
 export class QianfanAdapter extends LlmAdapter {
-  /** Shared rate limiter – one per adapter instance (per process). */
-  private readonly rateLimiter: QianfanRateLimiter | null
+  /** Effective rate-limit config this adapter is currently pacing with. */
+  private rateLimiterConfig: RateLimiterConfig | undefined
+  /** Shared rate limiter – rebuilt lazily whenever `rateLimiterConfig` changes. */
+  private rateLimiter: QianfanRateLimiter | null
 
   constructor(private readonly config: QianfanAdapterOptions) {
     super()
-    const rl = config.options().rateLimit
+    this.syncRateLimiter()
+  }
+
+  /**
+   * Re-read the resolved rate-limit config (settings section merged over env)
+   * and rebuild the limiter only when it actually changed, so edits made in the
+   * plugin's settings card apply without restarting the process.
+   */
+  private syncRateLimiter(): void {
+    const next = this.config.options().rateLimit
+    if (sameRateLimitConfig(next, this.rateLimiterConfig)) return
+    this.rateLimiterConfig = next
     this.rateLimiter =
-      rl !== undefined && (rl.tpm > 0 || rl.rpm > 0)
-        ? new QianfanRateLimiter(rl)
+      next !== undefined && (next.tpm > 0 || next.rpm > 0)
+        ? new QianfanRateLimiter(next)
         : null
   }
 
@@ -91,12 +189,14 @@ export class QianfanAdapter extends LlmAdapter {
     const connection = this.config.options()
     const configured = connection.models.find((e) => e.id === model)
     const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow
+    const reasoning = reasoningOf(configured, connection.defaultReasoning)
     return Promise.resolve({
       ...(configured === undefined
         ? { provider, id: model, name: model, inputModalities: ['text' as const] }
         : modelInfo(provider, configured)),
       context: { contextWindow },
       defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
+      ...(reasoning === undefined ? {} : { reasoning }),
     })
   }
 
@@ -171,17 +271,23 @@ export class QianfanAdapter extends LlmAdapter {
     apiKey: string,
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
-    // Auto-inject thinking parameter based on model config
+    // Auto-inject thinking parameter based on model config. An explicit
+    // reasoning effort (off/high/max, chosen in the model picker or defaulted
+    // from the provider's `reasoning` setting) takes precedence over the
+    // legacy boolean `thinking` switch.
     const configured = connection.models.find((m) => m.id === options.model)
+    const hasEffort = options.reasoningEffort !== undefined
     const optionsWithThinking = {
       ...options,
-      ...(configured?.thinking ? { thinking: true } : {}),
+      ...(!hasEffort && configured?.thinking ? { thinking: true } : {}),
     }
 
     const body = serializeRequest(optionsWithThinking, connection.maxTokens)
     const payload = JSON.stringify(body)
 
     // ═══ Layer 1 + 2: Pre-send estimation + token-bucket pacing ═══
+    // Re-sync the limiter first so settings-card edits apply immediately.
+    this.syncRateLimiter()
     if (this.rateLimiter !== null) {
       const estimatedTokens = QianfanRateLimiter.estimateTokens(
         payload.length,

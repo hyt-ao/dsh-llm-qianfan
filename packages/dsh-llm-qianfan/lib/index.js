@@ -1,5 +1,5 @@
 import z from "@deepseek-ai/schemastery";
-import { CallId, LlmAdapter, LlmError, RetryPolicySchema, assertUsableApiKey, attributionHeaders, resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
+import { CallId, LlmAdapter, LlmError, ReasoningEffortId, RetryPolicySchema, assertUsableApiKey, attributionHeaders, resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
 import { launchEnvironmentOf } from "@deepseek-ai/dsh-launch-environment";
 import { deepEqualJson, installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
@@ -98,6 +98,8 @@ function normalizeContent(content) {
 }
 function serializeRequest(options, maxTokens) {
 	const tools = normalizeTools(options.tools);
+	const effort = options.reasoningEffort;
+	const reasoningFields = effort === void 0 ? options.thinking === true ? { thinking: { type: "enabled" } } : {} : effort === "off" ? { thinking: { type: "disabled" } } : { reasoning_effort: effort };
 	return {
 		model: options.model,
 		messages: options.messages.map((m) => ({
@@ -113,7 +115,7 @@ function serializeRequest(options, maxTokens) {
 			tool_choice: options.toolChoice
 		} : {},
 		stream: true,
-		...options.thinking === true && { thinking: { type: "enabled" } }
+		...reasoningFields
 	};
 }
 //#endregion
@@ -382,6 +384,12 @@ const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 3e5;
 const STREAM_IDLE_TIMEOUT_CODE = "LLM_STREAM_IDLE_TIMEOUT";
 /** Qianfan-specific error codes that indicate rate limiting. */
 const QIANFAN_RATE_LIMIT_CODES = /* @__PURE__ */ new Set([336502, 18]);
+/** Structural equality for rate-limit configs (avoids rebuilding on every request). */
+function sameRateLimitConfig(a, b) {
+	if (a === b) return true;
+	if (a === void 0 || b === void 0) return false;
+	return a.tpm === b.tpm && a.rpm === b.rpm && a.safetyMargin === b.safetyMargin && a.minIntervalMs === b.minIntervalMs;
+}
 function modelInfo(provider, model) {
 	return {
 		provider,
@@ -389,6 +397,51 @@ function modelInfo(provider, model) {
 		name: model.name ?? model.id,
 		...model.description === void 0 ? {} : { description: model.description },
 		inputModalities: ["text"]
+	};
+}
+/** "off" is the canonical disabled-thinking level id used across DSH adapters. */
+const OFF_LEVEL = "off";
+/**
+* Build the reasoning-effort metadata the DSH catalog projection reads to
+* render the model picker's effort menu, from a model's `reasoningEfforts`
+* declaration and the provider's configured default level.
+*
+* The declaration maps level id → wire value (`off: null` disables thinking,
+* `high`/`max` pass through to the API's `reasoning_effort` parameter).
+* Only levels with a usable wire value are surfaced; `false` (explicit
+* opt-out) and absent declarations expose no menu at all.
+*
+* @param model - the resolved catalog model (may be a plain object shape).
+* @param defaultLevel - the provider-level default effort id, if any.
+* @returns the reasoning metadata (or undefined when none can be offered).
+*/
+function reasoningOf(model, defaultLevel) {
+	const efforts = model?.reasoningEfforts;
+	if (efforts === void 0 || efforts === null) return void 0;
+	if (efforts === false || typeof efforts !== "object") return void 0;
+	const levels = [];
+	for (const [id, wire] of Object.entries(efforts)) {
+		if (id === OFF_LEVEL && wire === null) {
+			levels.push({
+				id: OFF_LEVEL,
+				name: "Off"
+			});
+			continue;
+		}
+		if (typeof wire !== "string" || wire.length === 0) continue;
+		levels.push({
+			id,
+			name: `${id.charAt(0).toUpperCase()}${id.slice(1)}`
+		});
+	}
+	if (levels.length === 0) return void 0;
+	const hasDefault = typeof defaultLevel === "string" && levels.some((level) => level.id === defaultLevel);
+	return {
+		efforts: levels.map((level) => ({
+			id: ReasoningEffortId(level.id),
+			name: level.name
+		})),
+		...hasDefault ? { defaultEffort: ReasoningEffortId(defaultLevel) } : {}
 	};
 }
 function httpErrorCode(status, error) {
@@ -400,13 +453,25 @@ function httpErrorCode(status, error) {
 }
 var QianfanAdapter = class extends LlmAdapter {
 	config;
-	/** Shared rate limiter – one per adapter instance (per process). */
+	/** Effective rate-limit config this adapter is currently pacing with. */
+	rateLimiterConfig;
+	/** Shared rate limiter – rebuilt lazily whenever `rateLimiterConfig` changes. */
 	rateLimiter;
 	constructor(config) {
 		super();
 		this.config = config;
-		const rl = config.options().rateLimit;
-		this.rateLimiter = rl !== void 0 && (rl.tpm > 0 || rl.rpm > 0) ? new QianfanRateLimiter(rl) : null;
+		this.syncRateLimiter();
+	}
+	/**
+	* Re-read the resolved rate-limit config (settings section merged over env)
+	* and rebuild the limiter only when it actually changed, so edits made in the
+	* plugin's settings card apply without restarting the process.
+	*/
+	syncRateLimiter() {
+		const next = this.config.options().rateLimit;
+		if (sameRateLimitConfig(next, this.rateLimiterConfig)) return;
+		this.rateLimiterConfig = next;
+		this.rateLimiter = next !== void 0 && (next.tpm > 0 || next.rpm > 0) ? new QianfanRateLimiter(next) : null;
 	}
 	providerInfo(provider) {
 		return {
@@ -424,6 +489,7 @@ var QianfanAdapter = class extends LlmAdapter {
 		const connection = this.config.options();
 		const configured = connection.models.find((e) => e.id === model);
 		const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow;
+		const reasoning = reasoningOf(configured, connection.defaultReasoning);
 		return Promise.resolve({
 			...configured === void 0 ? {
 				provider,
@@ -432,7 +498,8 @@ var QianfanAdapter = class extends LlmAdapter {
 				inputModalities: ["text"]
 			} : modelInfo(provider, configured),
 			context: { contextWindow },
-			defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens
+			defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
+			...reasoning === void 0 ? {} : { reasoning }
 		});
 	}
 	async *stream(options) {
@@ -468,11 +535,13 @@ var QianfanAdapter = class extends LlmAdapter {
 	}
 	async *request(options, signal, connection, apiKey, onComment) {
 		const configured = connection.models.find((m) => m.id === options.model);
+		const hasEffort = options.reasoningEffort !== void 0;
 		const body = serializeRequest({
 			...options,
-			...configured?.thinking ? { thinking: true } : {}
+			...!hasEffort && configured?.thinking ? { thinking: true } : {}
 		}, connection.maxTokens);
 		const payload = JSON.stringify(body);
+		this.syncRateLimiter();
 		if (this.rateLimiter !== null) {
 			const estimatedTokens = QianfanRateLimiter.estimateTokens(payload.length, options.maxTokens ?? connection.maxTokens ?? 8192);
 			console.error(`[qianfan-rate] acquiring: est=${estimatedTokens} tokens`);
@@ -567,7 +636,9 @@ const catalogModel = z.object({
 	name: z.string(),
 	description: z.string(),
 	contextWindow: z.number().step(1).min(1),
-	maxTokens: z.number().step(1).min(1)
+	maxTokens: z.number().step(1).min(1),
+	thinking: z.boolean(),
+	reasoningEfforts: z.union([z.const(false), z.dict(z.union([z.string(), z.const(null)]))])
 });
 const Config = z.object({
 	apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV),
@@ -576,7 +647,14 @@ const Config = z.object({
 	defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
 	models: z.array(catalogModel).default(DEFAULT_MODELS),
 	streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
-	retryPolicy: RetryPolicySchema
+	retryPolicy: RetryPolicySchema,
+	reasoning: z.string(),
+	rateLimit: z.object({
+		tpm: z.number().min(0),
+		rpm: z.number().min(0),
+		safetyMargin: z.number().min(0).max(1),
+		minIntervalMs: z.number().min(0)
+	})
 });
 const PUBLIC_BASE_URL = "https://qianfan.baidubce.com/v2";
 const BASE_URL_ENV = "QIANFAN_BASE_URL";
@@ -602,6 +680,31 @@ function resolveRateLimitFromEnv() {
 		minIntervalMs: Number.isFinite(minIntervalMs) && minIntervalMs >= 0 ? minIntervalMs : 200
 	};
 }
+/**
+* ★ 新增：settings 优先、env 兜底的 rateLimit 合并 ★
+*
+* Per-field precedence: `config.rateLimit` (settings section) > `QIANFAN_RATE_LIMIT_*`
+* env vars > documented defaults. `undefined` (limiter disabled) is returned only
+* when both effective tpm and rpm end up ≤ 0.
+*/
+function resolveRateLimit(configured) {
+	const env = resolveRateLimitFromEnv();
+	const pick = (key) => {
+		const fromSettings = configured?.[key];
+		if (fromSettings !== void 0) return fromSettings;
+		const fromEnv = env?.[key];
+		if (fromEnv !== void 0) return fromEnv;
+	};
+	const tpm = pick("tpm") ?? 0;
+	const rpm = pick("rpm") ?? 0;
+	if (!(tpm > 0) && !(rpm > 0)) return void 0;
+	return {
+		tpm: Math.max(0, tpm),
+		rpm: Math.max(0, rpm),
+		safetyMargin: pick("safetyMargin") ?? .15,
+		minIntervalMs: pick("minIntervalMs") ?? 200
+	};
+}
 function resolveAdapterOptions(config, environment) {
 	const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? 3e5;
 	return {
@@ -612,7 +715,8 @@ function resolveAdapterOptions(config, environment) {
 		models: resolveModels(config.models),
 		streamIdleTimeoutMs,
 		retryPolicy: resolveRetryPolicy(config.retryPolicy, "llm-qianfan: retryPolicy"),
-		rateLimit: resolveRateLimitFromEnv()
+		rateLimit: resolveRateLimit(config.rateLimit),
+		defaultReasoning: config.reasoning
 	};
 }
 function apply(ctx, config) {

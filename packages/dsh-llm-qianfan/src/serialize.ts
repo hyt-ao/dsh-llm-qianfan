@@ -13,7 +13,8 @@ export interface SerializedRequest {
   tools?: any[]
   tool_choice?: any
   stream: boolean
-  thinking?: boolean
+  thinking?: { type: 'enabled' | 'disabled' }
+  reasoning_effort?: string
 }
 
 /**
@@ -51,6 +52,20 @@ export function serializeRequest(
 ): SerializedRequest {
   const tools = normalizeTools(options.tools)
 
+  // Reasoning effort (IDSH model picker) → wire:
+  //   off   → thinking: { type: "disabled" }  (no reasoning at all)
+  //   high / max → reasoning_effort: "<id>"
+  // No effort → legacy boolean `thinking` switch → thinking: { type: "enabled" }
+  const effort = options.reasoningEffort
+  const reasoningFields =
+    effort === undefined
+      ? options.thinking === true
+        ? { thinking: { type: 'enabled' as const } }
+        : {}
+      : effort === 'off'
+        ? { thinking: { type: 'disabled' as const } }
+        : { reasoning_effort: effort }
+
   return {
     model: options.model,
     messages: options.messages.map((m: any) => ({
@@ -63,6 +78,6 @@ export function serializeRequest(
     stop: options.stop,
     ...(tools ? { tools, tool_choice: options.toolChoice } : {}),
     stream: true,
-    ...(options.thinking === true && { thinking: { type: 'enabled' } }),
+    ...reasoningFields,
   }
 }
