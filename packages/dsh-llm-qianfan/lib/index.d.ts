@@ -33,10 +33,23 @@ interface WireError {
     type?: string;
   };
 }
+interface WireToolCall {
+  /** Tool-call index in the stream (for parallel tool calls). */
+  index?: number;
+  /** Stable call id assigned by the model. */
+  id?: string;
+  /** Tool/function name and incremental arguments. */
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+  type?: string;
+}
 interface WireChoiceDelta {
   role?: string;
   content?: string | null;
   reasoning_content?: string | null;
+  tool_calls?: WireToolCall[] | null;
 }
 interface WireChoice {
   index?: number;
@@ -153,4 +166,4 @@ type ResolvedQianfanOptions = QianfanConnectionOptions;
 declare function resolveAdapterOptions(config: Config, environment?: LaunchEnvironmentSnapshot): ResolvedQianfanOptions;
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { Config, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS, PUBLIC_BASE_URL, QianfanAdapter, type QianfanAdapterOptions, type QianfanCatalogModel, type QianfanConnectionOptions, type QianfanDefaultReasoning, type QianfanReasoningEffort, type RateLimiterConfig, ResolvedQianfanOptions, type WireChoice, type WireChoiceDelta, type WireChunk, type WireError, type WireUsage, apply, inject, name, resolveAdapterOptions };
+export { Config, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS, PUBLIC_BASE_URL, QianfanAdapter, type QianfanAdapterOptions, type QianfanCatalogModel, type QianfanConnectionOptions, type QianfanDefaultReasoning, type QianfanReasoningEffort, type RateLimiterConfig, ResolvedQianfanOptions, type WireChoice, type WireChoiceDelta, type WireChunk, type WireError, type WireToolCall, type WireUsage, apply, inject, name, resolveAdapterOptions };

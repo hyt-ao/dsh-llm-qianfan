@@ -74,6 +74,9 @@ async function* parseSse(body, onComment) {
 }
 //#endregion
 //#region src/serialize.ts
+function isBlock(b) {
+	return !!b && typeof b === "object" && !Array.isArray(b);
+}
 /**
 * 将 message content 转为千帆 v2 接受的纯文本字符串。
 *
@@ -86,26 +89,89 @@ function normalizeContent(content) {
 	if (typeof content === "string") return content;
 	if (Array.isArray(content)) {
 		const texts = [];
-		for (const block of content) if (block && typeof block === "object") {
-			const b = block;
-			if (b.type === "text" && typeof b.text === "string") texts.push(b.text);
-		}
-		if (texts.length > 0) return texts.join("");
-		return JSON.stringify(content);
+		for (const block of content) if (isBlock(block) && block.type === "text" && typeof block.text === "string") texts.push(block.text);
+		return texts.join("");
 	}
 	if (content === null || content === void 0) return "";
 	return String(content);
+}
+/**
+* 将上游 DSH 消息序列化为千帆 v2 OpenAI 兼容格式。
+*
+* 关键修复：assistant 消息的 tool-call 块必须作为 `tool_calls` 独立字段发送，
+* tool-result 消息（DSH 中 role='user' + content=[{type:'tool-result'}]）必须
+* 转为 `role: "tool"` 并带 `tool_call_id`。
+* 此前把所有块压扁成纯文本（JSON.stringify(content)）会让模型看到
+* 历史里的 tool call 变成 JSON 文本，导致上下文污染与异常截断。
+*
+* 返回 undefined 表示该消息应被跳过（空 assistant）。
+*/
+function serializeMessage(m) {
+	const role = m.role;
+	const content = m.content;
+	if (Array.isArray(content) && content.length > 0 && isBlock(content[0]) && content[0].type === "tool-result") {
+		const block = content[0];
+		const toolCallId = typeof m.toolCallId === "string" && m.toolCallId ? m.toolCallId : typeof block.toolCallId === "string" ? block.toolCallId : "";
+		if (!toolCallId) return void 0;
+		const inner = block.content;
+		const texts = [];
+		if (typeof inner === "string") texts.push(inner);
+		else if (Array.isArray(inner)) {
+			for (const b of inner) if (isBlock(b) && b.type === "text" && typeof b.text === "string") texts.push(b.text);
+		}
+		const msg = {
+			role: "tool",
+			content: texts.join("\n").trim() || "(no tool output)",
+			tool_call_id: toolCallId
+		};
+		if (typeof m.toolName === "string") msg.name = m.toolName;
+		return msg;
+	}
+	if (role === "system" || role === "user") return {
+		role,
+		content: normalizeContent(content)
+	};
+	if (role === "assistant") {
+		const texts = [];
+		const toolCalls = [];
+		if (Array.isArray(content)) for (const block of content) {
+			if (!isBlock(block)) continue;
+			if (block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0) texts.push(block.text);
+			else if (block.type === "tool-call") {
+				const id = String(block.id ?? "");
+				const name = String(block.name ?? "");
+				const args = block.arguments;
+				toolCalls.push({
+					id,
+					type: "function",
+					function: {
+						name,
+						arguments: typeof args === "string" ? args : JSON.stringify(args ?? {})
+					}
+				});
+			}
+		}
+		const hasText = texts.length > 0;
+		if (!hasText && toolCalls.length === 0) return void 0;
+		return {
+			role: "assistant",
+			content: hasText ? texts.join("") : "",
+			...toolCalls.length > 0 ? { tool_calls: toolCalls } : {}
+		};
+	}
+	return {
+		role,
+		content: normalizeContent(content)
+	};
 }
 function serializeRequest(options, maxTokens) {
 	const tools = normalizeTools(options.tools);
 	const effort = options.reasoningEffort;
 	const reasoningFields = effort === void 0 ? options.thinking === true ? { thinking: { type: "enabled" } } : {} : effort === "off" ? { thinking: { type: "disabled" } } : { reasoning_effort: effort };
+	const messages = options.messages.map((m) => serializeMessage(m)).filter((m) => m !== void 0);
 	return {
 		model: options.model,
-		messages: options.messages.map((m) => ({
-			role: m.role,
-			content: normalizeContent(m.content)
-		})),
+		messages,
 		temperature: options.temperature,
 		top_p: options.topP,
 		max_tokens: options.maxTokens ?? maxTokens,

@@ -11,10 +11,24 @@ export interface WireError {
   }
 }
 
+export interface WireToolCall {
+  /** Tool-call index in the stream (for parallel tool calls). */
+  index?: number
+  /** Stable call id assigned by the model. */
+  id?: string
+  /** Tool/function name and incremental arguments. */
+  function?: {
+    name?: string
+    arguments?: string
+  }
+  type?: string
+}
+
 export interface WireChoiceDelta {
   role?: string
   content?: string | null
   reasoning_content?: string | null
+  tool_calls?: WireToolCall[] | null
 }
 
 export interface WireChoice {
