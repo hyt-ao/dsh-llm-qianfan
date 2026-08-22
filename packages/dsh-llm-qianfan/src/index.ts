@@ -11,7 +11,7 @@ import {
   DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS, DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   QianfanAdapter,
 } from './adapter.ts'
-import type { QianfanCatalogModel, QianfanConnectionOptions } from './adapter.ts'
+import type { QianfanCatalogModel, QianfanConnectionOptions, QianfanDefaultReasoning } from './adapter.ts'
 import type { RateLimiterConfig } from './rate-limiter.ts'
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -70,6 +70,8 @@ export interface Config {
   models?: QianfanCatalogModel[]
   streamIdleTimeoutMs?: number
   retryPolicy?: RetryPolicyConfig
+  /** Provider-level default reasoning effort id (e.g. `high` / `max` / `off`). */
+  reasoning?: QianfanDefaultReasoning
   // ★ rateLimit 不走 Config schema，纯环境变量驱动 ★
 }
 
@@ -79,6 +81,11 @@ const catalogModel: z<QianfanCatalogModel> = z.object({
   description: z.string(),
   contextWindow: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
+  thinking: z.boolean(),
+  reasoningEfforts: z.union([
+    z.const(false),
+    z.dict(z.union([z.string(), z.const(null)])),
+  ]),
 })
 
 export const Config: z<Config> = z.object({
@@ -89,6 +96,7 @@ export const Config: z<Config> = z.object({
   models: z.array(catalogModel).default(DEFAULT_MODELS),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   retryPolicy: RetryPolicySchema,
+  reasoning: z.string(),
   // ★ 不添加 rateLimit schema ★
 })
 
@@ -146,6 +154,9 @@ export function resolveAdapterOptions(config: Config, environment?: LaunchEnviro
     retryPolicy: resolveRetryPolicy(config.retryPolicy, 'llm-qianfan: retryPolicy'),
     // ★ 唯一新增行：从环境变量注入 rateLimit ★
     rateLimit: resolveRateLimitFromEnv(),
+    // Provider-level default reasoning effort, drives each model's effort menu
+    // pre-selection (via resolveModel metadata) unless overridden per request.
+    defaultReasoning: config.reasoning,
   }
 }
 

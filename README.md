@@ -1,105 +1,77 @@
-# dsh-llm-qianfan
+# dsh-qianfan (DeepSeek Harness Qianfan plugin family)
 
-百度千帆（Baidu Qianfan）大模型适配器插件，用于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的 LLM 接口层。
+百度千帆（Baidu Qianfan）插件家族，用于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）：
 
-## 功能
+| 包 | 说明 |
+|---|---|
+| [`packages/dsh-llm-qianfan`](packages/dsh-llm-qianfan) | 千帆 Chat Completions 适配器（含推理档位） |
+| [`packages/dsh-qianfan-tokenplan`](packages/dsh-qianfan-tokenplan) | 千帆 Token Plan 个人版套餐余量卡片（侧边栏） |
 
-- 将 DSH 的统一 LLM 接口对接到百度千帆的 Chat Completions API
-- 支持流式输出（SSE streaming）
-- 支持工具调用（function calling / tool use）
-- 支持思考模式（thinking / reasoning models，如 ERNIE-4.5）
+## packages/dsh-llm-qianfan —— 适配器
+
+将 DSH 的统一 LLM 接口对接到百度千帆的 Chat Completions API。
+
+### 功能
+
+- 流式输出（SSE streaming）
+- 工具调用（function calling / tool use）
+- 思考模式（thinking / reasoning models）
+- **推理档位（reasoning effort）**：支持 `off` / `high` / `max` 三档，经 DSH 模型选择器的「推理等级」菜单选择，映射为千帆 `reasoning_effort` 参数
 - 内置速率限制器（token bucket + header-based back-pressure）
-- 支持通过环境变量或 `.env.qianfan` 文件配置 API Key 和模型列表
+- 通过环境变量或 `.env.qianfan` 配置 API Key 和模型列表
 
-## 安装
-
-### 方式一：从 GitHub 安装（推荐，零编译）
+### 安装
 
 ```bash
+# from this monorepo (adapter only)
+cd packages/dsh-llm-qianfan
+dsh plugin add .
+
+# 或从上游 GitHub 安装（含同一仓库内两包）
 dsh plugin add github:hyt-ao/dsh-llm-qianfan
 ```
 
-> 仓库已包含预构建的 `lib/` 目录，克隆后无需编译，无需配置 `allowBuilds`。
+仓库已包含预构建的 `lib/` 目录，克隆后无需编译。
 
-### 方式二：克隆后本地安装
+### 配置
 
-```bash
-git clone https://github.com/hyt-ao/dsh-llm-qianfan.git
-dsh plugin add ./dsh-llm-qianfan
+在 DSH 的 `llm-qianfan:` 设置区块中填入千帆 API Key（或环境变量 `QIANFAN_API_KEY`）。
+
+**推理档位**：为每个模型声明 `reasoningEfforts`，并可设置 provider 级默认 `reasoning`：
+
+```yaml
+llm-qianfan:
+  reasoning: max            # 默认档位：off | high | max
+  models:
+    - id: deepseek-v4-pro
+      reasoningEfforts:
+        off: null
+        high: high
+        max: max
 ```
 
-## 配置
+- `off` → 关闭思考（请求发 `thinking: {type:"disabled"}`）
+- `high` / `max` → 开启思考并向 API 发 `reasoning_effort: high|max`
+- 模型的 `reasoningEfforts` 声明会让模型选择器显示「推理等级」菜单并预选 provider 默认档
+- 未声明 `reasoningEfforts` 的模型沿用布尔 `thinking` 开关，不显示档位菜单
 
-### 1. 设置 API Key
-
-在 DSH 的 `llm-qianfan:` 设置区块中填入你的千帆 API Key，或通过环境变量提供：
-
-```bash
-export QIANFAN_API_KEY="your-api-key-here"
-```
-
-也可以在项目根目录创建 `.env.qianfan` 文件：
-
-```
-QIANFAN_API_KEY=your-api-key-here
-```
-
-### 2. 自定义模型列表（可选）
-
-默认支持以下模型。如需添加或修改，设置环境变量：
-
-```bash
-export QIANFAN_MODELS='[{"id":"ernie-4.5-turbo-128k","thinking":true},{"id":"deepseek-v3"}]'
-```
-
-每个模型对象的字段：
-- `id`（必填）：千帆平台上的模型标识
-- `thinking`（可选，布尔值）：是否为思考模式模型
-
-### 3. 速率限制（可选）
-
-通过环境变量配置速率限制器：
-
-| 环境变量 | 说明 | 默认值 |
-|---------|------|--------|
-| `QIANFAN_RATE_LIMIT_TPM` | 每分钟 token 上限 | 不限制 |
-| `QIANFAN_RATE_LIMIT_RPM` | 每分钟请求上限 | 不限制 |
-| `QIANFAN_RATE_LIMIT_CONCURRENCY` | 最大并发请求数 | 不限制 |
-| `QIANFAN_RATE_LIMIT_IDLE_TIMEOUT_MS` | 空闲超时（毫秒） | 300000 |
-
-#### 注：最好做限制，不然容易超出限制导致中断
-#### 个人配置如下：
-```
-# Tokens-per-minute quota (0 or unset → disabled)
-QIANFAN_RATE_LIMIT_TPM=300000
-
-# Requests-per-minute quota (0 or unset → disabled)
-QIANFAN_RATE_LIMIT_RPM=100
-
-# Safety margin 0–1. Effective limit = quota × (1 − margin). Default 0.15
-QIANFAN_RATE_LIMIT_SAFETY_MARGIN=0.15
-
-# Minimum interval between consecutive requests (ms). Default 200
-QIANFAN_RATE_LIMIT_MIN_INTERVAL_MS=200
-```
-## 从源码构建
-
-如需自行修改并重新构建：
+### 从源码构建（monorepo）
 
 ```bash
 pnpm install
-pnpm build
+pnpm --filter dsh-llm-qianfan build
 ```
 
-构建产物输出到 `lib/` 目录。
+## packages/dsh-qianfan-tokenplan —— Token Plan 余量卡
 
-## 技术参数
+在 DSH 侧边栏显示千帆 Token Plan 个人版套餐的余量信息（套餐类型 / 剩余百分比 / 剩余与总量 token / 重置时间），并可在「设置 → 千帆 Token Plan」配置控制台 Cookie 自动刷新。
 
-| 参数 | 默认值 |
-|------|--------|
-| 上下文窗口 | 128,000 tokens |
-| 最大输出 tokens | 8,192 |
-| 流式空闲超时 | 300,000 ms (5 分钟) |
+数据来源：千帆控制台「我的订阅」接口（`console.bce.baidu.com/api/qianfan/charge/tokenPlanPersonal/resource`），凭据经 DSH 凭据库 `QIANFAN_TP_COOKIE` 引用，**不会**硬编码或写入仓库。
+
+```bash
+cd packages/dsh-qianfan-tokenplan
+dsh plugin add .
+```
 
 ## 许可证
 

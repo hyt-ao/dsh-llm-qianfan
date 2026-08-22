@@ -1,0 +1,134 @@
+/**
+ * dsh-qianfan-tokenplan 的 Host 面 Typert 清单（由 typert-loader 自动扫描注册）。
+ * 手写清单，结构与 @deepseek-ai/dsh-typert-generator 产物一致。
+ * `./typert` 导出 TYPERT，invocations 的 codec 必须是 zod v4 实例。
+ */
+
+import { z } from 'zod'
+
+const num = z.number()
+
+const stateSchema = z.object({
+  status: z.enum(['off', 'ok', 'error']),
+  message: z.string(),
+  fetchedAt: num,
+  planType: z.string(),
+  planLabel: z.string(),
+  resourceStatus: z.string(),
+  effectiveAt: z.string(),
+  expiresAt: z.string(),
+  totalTokens: num,
+  usedTokens: num,
+  remainingTokens: num,
+  remainingPercent: num,
+})
+
+const configSchema = z.object({
+  cookie: z.string(),
+  referer: z.string(),
+  userAgent: z.string(),
+  refreshMinutes: num,
+})
+
+const setConfigArgsSchema = z.object({
+  cookie: z.string().optional(),
+  referer: z.string().optional(),
+  userAgent: z.string().optional(),
+  refreshMinutes: num.optional(),
+})
+
+const resultSchema = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  configured: z.boolean(),
+  state: stateSchema.optional(),
+})
+
+const getStateResultSchema = z.object({
+  configured: z.boolean(),
+  state: stateSchema,
+})
+
+const _state$codec = { mode: 'strict', typeSymbol: 'dsh-qianfan-tokenplan#TokenPlanState', schema: stateSchema }
+const _setConfigArgs$codec = { mode: 'strict', typeSymbol: 'dsh-qianfan-tokenplan#SetConfigArgs', schema: setConfigArgsSchema }
+const _result$codec = { mode: 'strict', typeSymbol: 'dsh-qianfan-tokenplan#Result', schema: resultSchema }
+const _getStateResult$codec = { mode: 'strict', typeSymbol: 'dsh-qianfan-tokenplan#GetStateResult', schema: getStateResultSchema }
+
+export { stateSchema as stateSchema }
+
+export const TYPERT = {
+  package: 'dsh-qianfan-tokenplan',
+  face: 'host',
+  schemas: [],
+  invocations: [
+    {
+      id: 'dsh-qianfan-tokenplan#qianfanTokenPlan/getState',
+      service: 'qianfanTokenPlan',
+      namespace: 'qianfanTokenPlan',
+      method: 'getState',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: _getStateResult$codec,
+    },
+    {
+      id: 'dsh-qianfan-tokenplan#qianfanTokenPlan/setConfig',
+      service: 'qianfanTokenPlan',
+      namespace: 'qianfanTokenPlan',
+      method: 'setConfig',
+      invocation: { kind: 'direct' },
+      parameters: [
+        { name: 'args', wire: 'args', source: 'json', codec: _setConfigArgs$codec },
+      ],
+      result: _result$codec,
+    },
+    {
+      id: 'dsh-qianfan-tokenplan#qianfanTokenPlan/refresh',
+      service: 'qianfanTokenPlan',
+      namespace: 'qianfanTokenPlan',
+      method: 'refresh',
+      invocation: { kind: 'direct' },
+      parameters: [],
+      result: _result$codec,
+    },
+  ],
+  model: {
+    services: [
+      {
+        description: '百度千帆 Token Plan 个人版余量查询服务 (ctx.qianfanTokenPlan)。Qianfan Token Plan Personal quota service.',
+        summary: '千帆 Token Plan 余量服务 (dsh-qianfan-tokenplan)。',
+        tags: [],
+        jsDoc: '/** 千帆 Token Plan 个人版余量查询服务 (ctx.qianfanTokenPlan)。 */',
+        key: 'qianfanTokenPlan',
+        exportName: 'QianfanTokenPlanService',
+        members: [
+          {
+            kind: 'method',
+            name: 'getState',
+            signature: 'getState(): GetStateResult',
+            summary: '读取当前余量状态与配置标记。Read current quota state and config flag.',
+            jsDoc: '/** 读取当前余量状态与配置标记。 */',
+          },
+          {
+            kind: 'method',
+            name: 'setConfig',
+            signature: 'setConfig(args: SetConfigArgs): Result',
+            summary: '保存配置（Cookie/Referer/UA/刷新间隔）并立即刷新。Save config and refresh immediately.',
+            jsDoc: '/** 保存配置并立即刷新。 */',
+          },
+          {
+            kind: 'method',
+            name: 'refresh',
+            signature: 'refresh(): Result',
+            summary: '立即强制刷新余量。Force-refresh quota now.',
+            jsDoc: '/** 立即强制刷新余量。 */',
+          },
+        ],
+        types: [],
+      },
+    ],
+    events: [],
+    objects: [],
+  },
+}
+
+export default TYPERT

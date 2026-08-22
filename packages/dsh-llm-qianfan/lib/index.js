@@ -1,5 +1,5 @@
 import z from "@deepseek-ai/schemastery";
-import { CallId, LlmAdapter, LlmError, RetryPolicySchema, assertUsableApiKey, attributionHeaders, resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
+import { CallId, LlmAdapter, LlmError, ReasoningEffortId, RetryPolicySchema, assertUsableApiKey, attributionHeaders, resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
 import { launchEnvironmentOf } from "@deepseek-ai/dsh-launch-environment";
 import { deepEqualJson, installSettingsSection, settingsNamespace } from "@deepseek-ai/dsh-settings";
@@ -98,6 +98,8 @@ function normalizeContent(content) {
 }
 function serializeRequest(options, maxTokens) {
 	const tools = normalizeTools(options.tools);
+	const effort = options.reasoningEffort;
+	const reasoningFields = effort === void 0 ? options.thinking === true ? { thinking: { type: "enabled" } } : {} : effort === "off" ? { thinking: { type: "disabled" } } : { reasoning_effort: effort };
 	return {
 		model: options.model,
 		messages: options.messages.map((m) => ({
@@ -113,7 +115,7 @@ function serializeRequest(options, maxTokens) {
 			tool_choice: options.toolChoice
 		} : {},
 		stream: true,
-		...options.thinking === true && { thinking: { type: "enabled" } }
+		...reasoningFields
 	};
 }
 //#endregion
@@ -391,6 +393,51 @@ function modelInfo(provider, model) {
 		inputModalities: ["text"]
 	};
 }
+/** "off" is the canonical disabled-thinking level id used across DSH adapters. */
+const OFF_LEVEL = "off";
+/**
+* Build the reasoning-effort metadata the DSH catalog projection reads to
+* render the model picker's effort menu, from a model's `reasoningEfforts`
+* declaration and the provider's configured default level.
+*
+* The declaration maps level id → wire value (`off: null` disables thinking,
+* `high`/`max` pass through to the API's `reasoning_effort` parameter).
+* Only levels with a usable wire value are surfaced; `false` (explicit
+* opt-out) and absent declarations expose no menu at all.
+*
+* @param model - the resolved catalog model (may be a plain object shape).
+* @param defaultLevel - the provider-level default effort id, if any.
+* @returns the reasoning metadata (or undefined when none can be offered).
+*/
+function reasoningOf(model, defaultLevel) {
+	const efforts = model?.reasoningEfforts;
+	if (efforts === void 0 || efforts === null) return void 0;
+	if (efforts === false || typeof efforts !== "object") return void 0;
+	const levels = [];
+	for (const [id, wire] of Object.entries(efforts)) {
+		if (id === OFF_LEVEL && wire === null) {
+			levels.push({
+				id: OFF_LEVEL,
+				name: "Off"
+			});
+			continue;
+		}
+		if (typeof wire !== "string" || wire.length === 0) continue;
+		levels.push({
+			id,
+			name: `${id.charAt(0).toUpperCase()}${id.slice(1)}`
+		});
+	}
+	if (levels.length === 0) return void 0;
+	const hasDefault = typeof defaultLevel === "string" && levels.some((level) => level.id === defaultLevel);
+	return {
+		efforts: levels.map((level) => ({
+			id: ReasoningEffortId(level.id),
+			name: level.name
+		})),
+		...hasDefault ? { defaultEffort: ReasoningEffortId(defaultLevel) } : {}
+	};
+}
 function httpErrorCode(status, error) {
 	if (status === 401 || status === 403) return "AUTH";
 	if (status === 429) return "RATE_LIMIT";
@@ -424,6 +471,7 @@ var QianfanAdapter = class extends LlmAdapter {
 		const connection = this.config.options();
 		const configured = connection.models.find((e) => e.id === model);
 		const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow;
+		const reasoning = reasoningOf(configured, connection.defaultReasoning);
 		return Promise.resolve({
 			...configured === void 0 ? {
 				provider,
@@ -432,7 +480,8 @@ var QianfanAdapter = class extends LlmAdapter {
 				inputModalities: ["text"]
 			} : modelInfo(provider, configured),
 			context: { contextWindow },
-			defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens
+			defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
+			...reasoning === void 0 ? {} : { reasoning }
 		});
 	}
 	async *stream(options) {
@@ -468,9 +517,10 @@ var QianfanAdapter = class extends LlmAdapter {
 	}
 	async *request(options, signal, connection, apiKey, onComment) {
 		const configured = connection.models.find((m) => m.id === options.model);
+		const hasEffort = options.reasoningEffort !== void 0;
 		const body = serializeRequest({
 			...options,
-			...configured?.thinking ? { thinking: true } : {}
+			...!hasEffort && configured?.thinking ? { thinking: true } : {}
 		}, connection.maxTokens);
 		const payload = JSON.stringify(body);
 		if (this.rateLimiter !== null) {
@@ -567,7 +617,9 @@ const catalogModel = z.object({
 	name: z.string(),
 	description: z.string(),
 	contextWindow: z.number().step(1).min(1),
-	maxTokens: z.number().step(1).min(1)
+	maxTokens: z.number().step(1).min(1),
+	thinking: z.boolean(),
+	reasoningEfforts: z.union([z.const(false), z.dict(z.union([z.string(), z.const(null)]))])
 });
 const Config = z.object({
 	apiKeyEnv: z.string().role("credential-ref").default(DEFAULT_API_KEY_ENV),
@@ -576,7 +628,8 @@ const Config = z.object({
 	defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
 	models: z.array(catalogModel).default(DEFAULT_MODELS),
 	streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
-	retryPolicy: RetryPolicySchema
+	retryPolicy: RetryPolicySchema,
+	reasoning: z.string()
 });
 const PUBLIC_BASE_URL = "https://qianfan.baidubce.com/v2";
 const BASE_URL_ENV = "QIANFAN_BASE_URL";
@@ -612,7 +665,8 @@ function resolveAdapterOptions(config, environment) {
 		models: resolveModels(config.models),
 		streamIdleTimeoutMs,
 		retryPolicy: resolveRetryPolicy(config.retryPolicy, "llm-qianfan: retryPolicy"),
-		rateLimit: resolveRateLimitFromEnv()
+		rateLimit: resolveRateLimitFromEnv(),
+		defaultReasoning: config.reasoning
 	};
 }
 function apply(ctx, config) {

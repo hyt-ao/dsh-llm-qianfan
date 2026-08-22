@@ -4,10 +4,12 @@ import {
   attributionHeaders,
   LlmAdapter,
   LlmError,
+  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
+  LlmModelReasoningInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
   ResolvedRetryPolicy,
@@ -22,10 +24,16 @@ import type {
   QianfanAdapterOptions,
   QianfanCatalogModel,
   QianfanConnectionOptions,
+  QianfanDefaultReasoning,
   WireError,
 } from './types.ts'
 
-export type { QianfanAdapterOptions, QianfanCatalogModel, QianfanConnectionOptions }
+export type {
+  QianfanAdapterOptions,
+  QianfanCatalogModel,
+  QianfanConnectionOptions,
+  QianfanDefaultReasoning,
+}
 
 export const DEFAULT_CONTEXT_WINDOW = 128_000
 export const DEFAULT_MAX_TOKENS = 8_192
@@ -44,6 +52,67 @@ function modelInfo(provider: string, model: QianfanCatalogModel): LlmModelInfo {
     ...model.description === undefined ? {} : { description: model.description },
     inputModalities: ['text'],
   }
+}
+
+/** "off" is the canonical disabled-thinking level id used across DSH adapters. */
+const OFF_LEVEL = 'off'
+
+/**
+ * Build the reasoning-effort metadata the DSH catalog projection reads to
+ * render the model picker's effort menu, from a model's `reasoningEfforts`
+ * declaration and the provider's configured default level.
+ *
+ * The declaration maps level id → wire value (`off: null` disables thinking,
+ * `high`/`max` pass through to the API's `reasoning_effort` parameter).
+ * Only levels with a usable wire value are surfaced; `false` (explicit
+ * opt-out) and absent declarations expose no menu at all.
+ *
+ * @param model - the resolved catalog model (may be a plain object shape).
+ * @param defaultLevel - the provider-level default effort id, if any.
+ * @returns the reasoning metadata (or undefined when none can be offered).
+ */
+function reasoningOf(
+  model: QianfanCatalogModel | undefined,
+  defaultLevel: QianfanDefaultReasoning,
+): LlmModelReasoningInfo | undefined {
+  const efforts = model?.reasoningEfforts
+  if (efforts === undefined || efforts === null) return undefined
+  if (efforts === false || typeof efforts !== 'object') return undefined
+
+  const levels: Array<{ id: string; name: string }> = []
+  for (const [id, wire] of Object.entries(efforts)) {
+    if (id === OFF_LEVEL && wire === null) {
+      levels.push({ id: OFF_LEVEL, name: 'Off' })
+      continue
+    }
+    if (typeof wire !== 'string' || wire.length === 0) continue
+    levels.push({ id, name: `${id.charAt(0).toUpperCase()}${id.slice(1)}` })
+  }
+  if (levels.length === 0) return undefined
+
+  const hasDefault =
+    typeof defaultLevel === 'string' &&
+    levels.some((level) => level.id === defaultLevel)
+  return {
+    efforts: levels.map((level) => ({
+      id: ReasoningEffortId(level.id),
+      name: level.name,
+    })),
+    ...(hasDefault ? { defaultEffort: ReasoningEffortId(defaultLevel) } : {}),
+  }
+}
+
+/**
+ * Map an effort id to the wire value the Qianfan API expects.
+ * `off` disables thinking; any other level id passes through as the API's
+ * `reasoning_effort` parameter (the API validates low/medium/high/max/…).
+ */
+export function effortToWire(
+  effort: string | undefined,
+): { reasoningEffort?: string; thinkingDisabled?: boolean } {
+  if (effort === undefined) return {}
+  if (effort === OFF_LEVEL) return { thinkingDisabled: true }
+  return { reasoningEffort: effort }
 }
 
 function httpErrorCode(status: number, error?: WireError['error']): string {
@@ -91,12 +160,14 @@ export class QianfanAdapter extends LlmAdapter {
     const connection = this.config.options()
     const configured = connection.models.find((e) => e.id === model)
     const contextWindow = configured?.contextWindow ?? connection.defaultContextWindow
+    const reasoning = reasoningOf(configured, connection.defaultReasoning)
     return Promise.resolve({
       ...(configured === undefined
         ? { provider, id: model, name: model, inputModalities: ['text' as const] }
         : modelInfo(provider, configured)),
       context: { contextWindow },
       defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
+      ...(reasoning === undefined ? {} : { reasoning }),
     })
   }
 
@@ -171,11 +242,15 @@ export class QianfanAdapter extends LlmAdapter {
     apiKey: string,
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
-    // Auto-inject thinking parameter based on model config
+    // Auto-inject thinking parameter based on model config. An explicit
+    // reasoning effort (off/high/max, chosen in the model picker or defaulted
+    // from the provider's `reasoning` setting) takes precedence over the
+    // legacy boolean `thinking` switch.
     const configured = connection.models.find((m) => m.id === options.model)
+    const hasEffort = options.reasoningEffort !== undefined
     const optionsWithThinking = {
       ...options,
-      ...(configured?.thinking ? { thinking: true } : {}),
+      ...(!hasEffort && configured?.thinking ? { thinking: true } : {}),
     }
 
     const body = serializeRequest(optionsWithThinking, connection.maxTokens)

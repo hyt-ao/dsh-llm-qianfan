@@ -40,14 +40,31 @@ export interface WireChunk {
 
 // ─── Catalog / model types ─────────────────────────────────────
 
+/** One selectable reasoning-effort level surfaced to the model picker. */
+export interface QianfanReasoningEffort {
+  id: string
+  name: string
+  description?: string
+}
+
+/** The provider-level default reasoning effort id, if any. */
+export type QianfanDefaultReasoning = string | undefined
+
 export interface QianfanCatalogModel {
   id: string
   name?: string
   description?: string
   contextWindow?: number
   maxTokens?: number
-  /** Enable extended-thinking mode for this model. */
+  /** Enable extended-thinking mode for this model (legacy boolean switch). */
   thinking?: boolean
+  /**
+   * Reasoning-effort declaration for this model: a map of level id → wire
+   * value. `off` maps to `null` (disabled thinking), higher levels map to the
+   * wire string the API expects (e.g. `high` → the `reasoning_effort` param).
+   * `false` explicitly opts the model out of any reasoning menu.
+   */
+  reasoningEfforts?: Record<string, string | null> | false
 }
 
 // ─── Connection options (resolved at runtime) ──────────────────
@@ -65,6 +82,8 @@ export interface QianfanConnectionOptions {
    * `undefined` ⇒ limiter disabled.
    */
   rateLimit?: RateLimiterConfig
+  /** Provider-level default reasoning effort id drives effort-menu pre-selection. */
+  defaultReasoning?: QianfanDefaultReasoning
 }
 
 // ─── Adapter constructor options ───────────────────────────────
