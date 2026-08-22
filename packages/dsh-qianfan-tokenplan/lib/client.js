@@ -163,6 +163,27 @@ window.__ModuleLoader__.load({
       if (v === null || typeof v !== 'object' || Array.isArray(v)) fail('config', 'object')
       return v
     })
+    function parseRateLimitResult(v, path) {
+      if (v === null || typeof v !== 'object' || Array.isArray(v)) fail(path || 'rateLimitResult', 'object')
+      let rl = null
+      if (v.rateLimit !== null && v.rateLimit !== undefined) {
+        const r = v.rateLimit
+        if (typeof r === 'object' && !Array.isArray(r)) {
+          rl = {
+            tpm: typeof r.tpm === 'number' ? r.tpm : 0,
+            rpm: typeof r.rpm === 'number' ? r.rpm : 0,
+            safetyMargin: typeof r.safetyMargin === 'number' ? r.safetyMargin : 0.15,
+            minIntervalMs: typeof r.minIntervalMs === 'number' ? r.minIntervalMs : 200,
+          }
+        }
+      }
+      return {
+        ok: v.ok === true,
+        message: typeof v.message === 'string' ? v.message : '',
+        rateLimit: rl,
+      }
+    }
+    const rateLimitResultCodec = codecOf(parseRateLimitResult)
 
     // ── RPC 贡献（与 ./typert 清单一一对应；typeSymbol 必须与 Host 完全一致） ──
 
@@ -184,6 +205,17 @@ window.__ModuleLoader__.load({
           id: 'dsh-qianfan-tokenplan#qianfanTokenPlan/refresh', service: 'qianfanTokenPlan', namespace: 'qianfanTokenPlan', method: 'refresh',
           invocation: { kind: 'direct' }, parameters: [],
           result: { mode: 'strict', typeSymbol: 'dsh-qianfan-tokenplan#Result', schema: resultCodec },
+        },
+        {
+          id: 'dsh-qianfan-tokenplan#qianfanTokenPlan/getRateLimit', service: 'qianfanTokenPlan', namespace: 'qianfanTokenPlan', method: 'getRateLimit',
+          invocation: { kind: 'direct' }, parameters: [],
+          result: { mode: 'strict', typeSymbol: 'dsh-qianfan-tokenplan#RateLimitResult', schema: rateLimitResultCodec },
+        },
+        {
+          id: 'dsh-qianfan-tokenplan#qianfanTokenPlan/setRateLimit', service: 'qianfanTokenPlan', namespace: 'qianfanTokenPlan', method: 'setRateLimit',
+          invocation: { kind: 'direct' },
+          parameters: [{ name: 'args', wire: 'args', source: 'json', codec: { mode: 'strict', typeSymbol: 'dsh-qianfan-tokenplan#SetRateLimitArgs', schema: codecOf((v) => { if (v === null || typeof v !== 'object' || Array.isArray(v)) fail('setRateLimitArgs', 'object'); return v }) } }],
+          result: { mode: 'strict', typeSymbol: 'dsh-qianfan-tokenplan#RateLimitResult', schema: rateLimitResultCodec },
         },
       ],
     }
@@ -309,6 +341,13 @@ window.__ModuleLoader__.load({
       const [minutes, setMinutes] = React.useState('15')
       const [msg, setMsg] = React.useState({ kind: '', text: '' })
       const [busy, setBusy] = React.useState(false)
+      // Rate Limit 表单状态
+      const [rlTpm, setRlTpm] = React.useState('')
+      const [rlRpm, setRlRpm] = React.useState('')
+      const [rlMargin, setRlMargin] = React.useState('')
+      const [rlMinInt, setRlMinInt] = React.useState('')
+      const [rlMsg, setRlMsg] = React.useState({ kind: '', text: '' })
+      const [rlBusy, setRlBusy] = React.useState(false)
 
       React.useEffect(() => {
         if (!svc) return
@@ -317,7 +356,44 @@ window.__ModuleLoader__.load({
           setConfigured(p.configured)
           setStateView(p.state || null)
         }).catch(() => {})
+        // 同时加载 rateLimit
+        unwrap(svc.getRateLimit()).then((v) => {
+          const p = parseRateLimitResult(v, 'getRateLimit')
+          if (p.ok && p.rateLimit) {
+            setRlTpm(String(p.rateLimit.tpm || ''))
+            setRlRpm(String(p.rateLimit.rpm || ''))
+            setRlMargin(String(p.rateLimit.safetyMargin ?? ''))
+            setRlMinInt(String(p.rateLimit.minIntervalMs ?? ''))
+          }
+        }).catch(() => {})
       }, [svc])
+
+      const saveRateLimit = () => {
+        if (!svc) return
+        setRlBusy(true)
+        setRlMsg({ kind: '', text: '' })
+        const patch = {}
+        const tpm = Number(rlTpm)
+        const rpm = Number(rlRpm)
+        const margin = Number(rlMargin)
+        const minInt = Number(rlMinInt)
+        if (Number.isFinite(tpm)) patch.tpm = tpm
+        if (Number.isFinite(rpm)) patch.rpm = rpm
+        if (Number.isFinite(margin)) patch.safetyMargin = margin
+        if (Number.isFinite(minInt)) patch.minIntervalMs = minInt
+        unwrap(svc.setRateLimit(patch)).then((v) => {
+          const p = parseRateLimitResult(v, 'setRateLimit')
+          setRlMsg({ kind: p.ok ? 'ok' : 'err', text: p.message || (p.ok ? '已保存' : '保存失败') })
+          if (p.ok && p.rateLimit) {
+            setRlTpm(String(p.rateLimit.tpm || ''))
+            setRlRpm(String(p.rateLimit.rpm || ''))
+            setRlMargin(String(p.rateLimit.safetyMargin ?? ''))
+            setRlMinInt(String(p.rateLimit.minIntervalMs ?? ''))
+          }
+        }).catch((err) => {
+          setRlMsg({ kind: 'err', text: '保存失败：' + String(err && err.message || err) })
+        }).finally(() => setRlBusy(false))
+      }
 
       const save = () => {
         if (!svc) return
@@ -377,6 +453,34 @@ window.__ModuleLoader__.load({
           e('span', { className: 'qf-q' }, 'tokenPlanPersonal/resource'),
           ' 请求 → 复制其 Cookie 请求头的完整值粘贴到上方。Cookie 过期后在此更新即可。',
         ]),
+        // ── 速率限制配置 ──
+        e('hr', { style: { border: 'none', borderTop: '1px solid var(--dsw-alias-border-l1)', margin: '6px 0', width: '100%' } }),
+        e('h3', null, '千帆 API 速率限制（TPM / RPM）'),
+        e('p', { className: 'qf-note2' }, [
+          '控制千帆适配器的客户端限流器（令牌桶）。设置后即时生效，无需重启。', e('br', null),
+          '留空 = 不修改当前值；全部填 0 = 禁用限流。环境变量 ', e('span', { className: 'qf-q' }, 'QIANFAN_RATE_LIMIT_*'),
+          ' 作为兜底默认值。',
+        ]),
+        e('div', { className: 'qf-field' }, [
+          e('label', null, 'TPM（每分钟 token 上限，如 500000）'),
+          e('input', { className: 'qf-input', type: 'number', value: rlTpm, placeholder: '留空不改', onChange: (ev) => setRlTpm(ev.target.value) }),
+        ]),
+        e('div', { className: 'qf-field' }, [
+          e('label', null, 'RPM（每分钟请求上限，如 100）'),
+          e('input', { className: 'qf-input', type: 'number', value: rlRpm, placeholder: '留空不改', onChange: (ev) => setRlRpm(ev.target.value) }),
+        ]),
+        e('div', { className: 'qf-field' }, [
+          e('label', null, '安全余量（0–1，默认 0.15，有效限额 = 配额 × (1 − 余量)）'),
+          e('input', { className: 'qf-input', type: 'number', step: '0.01', value: rlMargin, placeholder: '留空不改', onChange: (ev) => setRlMargin(ev.target.value) }),
+        ]),
+        e('div', { className: 'qf-field' }, [
+          e('label', null, '最小请求间隔（毫秒，默认 200）'),
+          e('input', { className: 'qf-input', type: 'number', value: rlMinInt, placeholder: '留空不改', onChange: (ev) => setRlMinInt(ev.target.value) }),
+        ]),
+        e('div', { className: 'qf-row' }, [
+          e('button', { className: 'qf-btn primary', onClick: saveRateLimit, disabled: rlBusy }, '保存速率限制'),
+        ]),
+        rlMsg.text ? e('div', { className: 'qf-msg ' + (rlMsg.kind === 'ok' ? 'ok' : 'err') }, rlMsg.text) : null,
       ])
     }
 

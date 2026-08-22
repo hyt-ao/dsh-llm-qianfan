@@ -315,6 +315,46 @@ function createService(ctx) {
         state: s,
       }
     },
+
+    /** 读取 llm-qianfan 适配器的 rateLimit 配置（跨命名空间）。 */
+    async getRateLimit() {
+      const settings = ctx.get('settings')
+      if (settings === undefined) {
+        return { ok: false, message: 'settings 服务未就绪', rateLimit: undefined }
+      }
+      const qf = settings.get('llm-qianfan')
+      if (qf === undefined || qf === null || typeof qf !== 'object') {
+        return { ok: true, message: '', rateLimit: undefined }
+      }
+      return { ok: true, message: '', rateLimit: qf.rateLimit }
+    },
+
+    /** 设置 llm-qianfan 适配器的 rateLimit 配置（跨命名空间写 settings）。 */
+    async setRateLimit(patch) {
+      const settings = ctx.get('settings')
+      if (settings === undefined) {
+        return { ok: false, message: 'settings 服务未就绪', rateLimit: undefined }
+      }
+      const rl = {}
+      if (patch !== null && typeof patch === 'object') {
+        if (typeof patch.tpm === 'number') rl.tpm = patch.tpm
+        if (typeof patch.rpm === 'number') rl.rpm = patch.rpm
+        if (typeof patch.safetyMargin === 'number') rl.safetyMargin = patch.safetyMargin
+        if (typeof patch.minIntervalMs === 'number') rl.minIntervalMs = patch.minIntervalMs
+      }
+      try {
+        // 用 update 做 merge patch：只更新传入的字段，保留其余字段不变。
+        await settings.update('llm-qianfan', { rateLimit: rl })
+        const updated = settings.get('llm-qianfan')
+        return {
+          ok: true,
+          message: '速率限制已保存，下次请求即时生效',
+          rateLimit: updated?.rateLimit,
+        }
+      } catch (e) {
+        return { ok: false, message: '保存失败：' + String(e && e.message || e), rateLimit: undefined }
+      }
+    },
   }
 
   // Typert 网关要求服务对象暴露 typertRemote 绑定（与 dsh-cost-meter 完全一致），
