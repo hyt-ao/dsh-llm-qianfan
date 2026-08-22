@@ -72,7 +72,12 @@ export interface Config {
   retryPolicy?: RetryPolicyConfig
   /** Provider-level default reasoning effort id (e.g. `high` / `max` / `off`). */
   reasoning?: QianfanDefaultReasoning
-  // ★ rateLimit 不走 Config schema，纯环境变量驱动 ★
+  /**
+   * Rate limiter quotas. Per-field precedence: settings > QIANFAN_RATE_LIMIT_* env > defaults.
+   * Omitted entirely (or both tpm and rpm ≤ 0) disables the limiter.
+   * Editable from the plugin's settings card; takes effect without a restart.
+   */
+  rateLimit?: Partial<RateLimiterConfig>
 }
 
 const catalogModel: z<QianfanCatalogModel> = z.object({
@@ -97,7 +102,14 @@ export const Config: z<Config> = z.object({
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   retryPolicy: RetryPolicySchema,
   reasoning: z.string(),
-  // ★ 不添加 rateLimit schema ★
+  // Optional rate limiter quotas surfaced in the plugin's settings card. Fields
+  // left absent fall back to `QIANFAN_RATE_LIMIT_*` env vars (or defaults).
+  rateLimit: z.object({
+    tpm: z.number().min(0),
+    rpm: z.number().min(0),
+    safetyMargin: z.number().min(0).max(1),
+    minIntervalMs: z.number().min(0),
+  }),
 })
 
 export const PUBLIC_BASE_URL = 'https://qianfan.baidubce.com/v2'
@@ -142,6 +154,36 @@ function resolveRateLimitFromEnv(): RateLimiterConfig | undefined {
   }
 }
 
+/**
+ * ★ 新增：settings 优先、env 兜底的 rateLimit 合并 ★
+ *
+ * Per-field precedence: `config.rateLimit` (settings section) > `QIANFAN_RATE_LIMIT_*`
+ * env vars > documented defaults. `undefined` (limiter disabled) is returned only
+ * when both effective tpm and rpm end up ≤ 0.
+ */
+function resolveRateLimit(configured: Partial<RateLimiterConfig> | undefined): RateLimiterConfig | undefined {
+  const env = resolveRateLimitFromEnv()
+
+  const pick = <K extends keyof RateLimiterConfig>(key: K): RateLimiterConfig[K] | undefined => {
+    const fromSettings = configured?.[key]
+    if (fromSettings !== undefined) return fromSettings
+    const fromEnv = env?.[key]
+    if (fromEnv !== undefined) return fromEnv
+    return undefined
+  }
+
+  const tpm = pick('tpm') ?? 0
+  const rpm = pick('rpm') ?? 0
+  if (!(tpm > 0) && !(rpm > 0)) return undefined
+
+  return {
+    tpm: Math.max(0, tpm),
+    rpm: Math.max(0, rpm),
+    safetyMargin: pick('safetyMargin') ?? 0.15,
+    minIntervalMs: pick('minIntervalMs') ?? 200,
+  }
+}
+
 export function resolveAdapterOptions(config: Config, environment?: LaunchEnvironmentSnapshot): ResolvedQianfanOptions {
   const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
   return {
@@ -152,8 +194,8 @@ export function resolveAdapterOptions(config: Config, environment?: LaunchEnviro
     models: resolveModels(config.models),
     streamIdleTimeoutMs,
     retryPolicy: resolveRetryPolicy(config.retryPolicy, 'llm-qianfan: retryPolicy'),
-    // ★ 唯一新增行：从环境变量注入 rateLimit ★
-    rateLimit: resolveRateLimitFromEnv(),
+    // 从 settings 段优先解析 rateLimit；settings 未配置的字段回退到环境变量
+    rateLimit: resolveRateLimit(config.rateLimit),
     // Provider-level default reasoning effort, drives each model's effort menu
     // pre-selection (via resolveModel metadata) unless overridden per request.
     defaultReasoning: config.reasoning,

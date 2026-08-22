@@ -78,7 +78,8 @@ export interface QianfanConnectionOptions {
   retryPolicy: import('@deepseek-ai/dsh-llm').ResolvedRetryPolicy
   /**
    * Client-side TPM / RPM rate limiter configuration.
-   * Sourced exclusively from QIANFAN_RATE_LIMIT_* env vars.
+   * Resolved per field from the `rateLimit` settings section, falling back to
+   * `QIANFAN_RATE_LIMIT_*` env vars, then documented defaults.
    * `undefined` ⇒ limiter disabled.
    */
   rateLimit?: RateLimiterConfig

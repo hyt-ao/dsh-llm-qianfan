@@ -384,6 +384,12 @@ const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 3e5;
 const STREAM_IDLE_TIMEOUT_CODE = "LLM_STREAM_IDLE_TIMEOUT";
 /** Qianfan-specific error codes that indicate rate limiting. */
 const QIANFAN_RATE_LIMIT_CODES = /* @__PURE__ */ new Set([336502, 18]);
+/** Structural equality for rate-limit configs (avoids rebuilding on every request). */
+function sameRateLimitConfig(a, b) {
+	if (a === b) return true;
+	if (a === void 0 || b === void 0) return false;
+	return a.tpm === b.tpm && a.rpm === b.rpm && a.safetyMargin === b.safetyMargin && a.minIntervalMs === b.minIntervalMs;
+}
 function modelInfo(provider, model) {
 	return {
 		provider,
@@ -447,13 +453,25 @@ function httpErrorCode(status, error) {
 }
 var QianfanAdapter = class extends LlmAdapter {
 	config;
-	/** Shared rate limiter – one per adapter instance (per process). */
+	/** Effective rate-limit config this adapter is currently pacing with. */
+	rateLimiterConfig;
+	/** Shared rate limiter – rebuilt lazily whenever `rateLimiterConfig` changes. */
 	rateLimiter;
 	constructor(config) {
 		super();
 		this.config = config;
-		const rl = config.options().rateLimit;
-		this.rateLimiter = rl !== void 0 && (rl.tpm > 0 || rl.rpm > 0) ? new QianfanRateLimiter(rl) : null;
+		this.syncRateLimiter();
+	}
+	/**
+	* Re-read the resolved rate-limit config (settings section merged over env)
+	* and rebuild the limiter only when it actually changed, so edits made in the
+	* plugin's settings card apply without restarting the process.
+	*/
+	syncRateLimiter() {
+		const next = this.config.options().rateLimit;
+		if (sameRateLimitConfig(next, this.rateLimiterConfig)) return;
+		this.rateLimiterConfig = next;
+		this.rateLimiter = next !== void 0 && (next.tpm > 0 || next.rpm > 0) ? new QianfanRateLimiter(next) : null;
 	}
 	providerInfo(provider) {
 		return {
@@ -523,6 +541,7 @@ var QianfanAdapter = class extends LlmAdapter {
 			...!hasEffort && configured?.thinking ? { thinking: true } : {}
 		}, connection.maxTokens);
 		const payload = JSON.stringify(body);
+		this.syncRateLimiter();
 		if (this.rateLimiter !== null) {
 			const estimatedTokens = QianfanRateLimiter.estimateTokens(payload.length, options.maxTokens ?? connection.maxTokens ?? 8192);
 			console.error(`[qianfan-rate] acquiring: est=${estimatedTokens} tokens`);
@@ -629,7 +648,13 @@ const Config = z.object({
 	models: z.array(catalogModel).default(DEFAULT_MODELS),
 	streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
 	retryPolicy: RetryPolicySchema,
-	reasoning: z.string()
+	reasoning: z.string(),
+	rateLimit: z.object({
+		tpm: z.number().min(0),
+		rpm: z.number().min(0),
+		safetyMargin: z.number().min(0).max(1),
+		minIntervalMs: z.number().min(0)
+	})
 });
 const PUBLIC_BASE_URL = "https://qianfan.baidubce.com/v2";
 const BASE_URL_ENV = "QIANFAN_BASE_URL";
@@ -655,6 +680,31 @@ function resolveRateLimitFromEnv() {
 		minIntervalMs: Number.isFinite(minIntervalMs) && minIntervalMs >= 0 ? minIntervalMs : 200
 	};
 }
+/**
+* ★ 新增：settings 优先、env 兜底的 rateLimit 合并 ★
+*
+* Per-field precedence: `config.rateLimit` (settings section) > `QIANFAN_RATE_LIMIT_*`
+* env vars > documented defaults. `undefined` (limiter disabled) is returned only
+* when both effective tpm and rpm end up ≤ 0.
+*/
+function resolveRateLimit(configured) {
+	const env = resolveRateLimitFromEnv();
+	const pick = (key) => {
+		const fromSettings = configured?.[key];
+		if (fromSettings !== void 0) return fromSettings;
+		const fromEnv = env?.[key];
+		if (fromEnv !== void 0) return fromEnv;
+	};
+	const tpm = pick("tpm") ?? 0;
+	const rpm = pick("rpm") ?? 0;
+	if (!(tpm > 0) && !(rpm > 0)) return void 0;
+	return {
+		tpm: Math.max(0, tpm),
+		rpm: Math.max(0, rpm),
+		safetyMargin: pick("safetyMargin") ?? .15,
+		minIntervalMs: pick("minIntervalMs") ?? 200
+	};
+}
 function resolveAdapterOptions(config, environment) {
 	const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? 3e5;
 	return {
@@ -665,7 +715,7 @@ function resolveAdapterOptions(config, environment) {
 		models: resolveModels(config.models),
 		streamIdleTimeoutMs,
 		retryPolicy: resolveRetryPolicy(config.retryPolicy, "llm-qianfan: retryPolicy"),
-		rateLimit: resolveRateLimitFromEnv(),
+		rateLimit: resolveRateLimit(config.rateLimit),
 		defaultReasoning: config.reasoning
 	};
 }

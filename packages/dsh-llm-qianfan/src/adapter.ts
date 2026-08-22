@@ -20,6 +20,7 @@ import { serializeRequest } from './serialize.ts'
 import { parseSse } from './client.ts'
 import { translate } from './translate.ts'
 import { QianfanRateLimiter } from './rate-limiter.ts'
+import type { RateLimiterConfig } from './rate-limiter.ts'
 import type {
   QianfanAdapterOptions,
   QianfanCatalogModel,
@@ -43,6 +44,21 @@ const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 
 /** Qianfan-specific error codes that indicate rate limiting. */
 const QIANFAN_RATE_LIMIT_CODES = new Set([336502, 18])
+
+/** Structural equality for rate-limit configs (avoids rebuilding on every request). */
+function sameRateLimitConfig(
+  a: RateLimiterConfig | undefined,
+  b: RateLimiterConfig | undefined,
+): boolean {
+  if (a === b) return true
+  if (a === undefined || b === undefined) return false
+  return (
+    a.tpm === b.tpm &&
+    a.rpm === b.rpm &&
+    a.safetyMargin === b.safetyMargin &&
+    a.minIntervalMs === b.minIntervalMs
+  )
+}
 
 function modelInfo(provider: string, model: QianfanCatalogModel): LlmModelInfo {
   return {
@@ -124,15 +140,28 @@ function httpErrorCode(status: number, error?: WireError['error']): string {
 }
 
 export class QianfanAdapter extends LlmAdapter {
-  /** Shared rate limiter – one per adapter instance (per process). */
-  private readonly rateLimiter: QianfanRateLimiter | null
+  /** Effective rate-limit config this adapter is currently pacing with. */
+  private rateLimiterConfig: RateLimiterConfig | undefined
+  /** Shared rate limiter – rebuilt lazily whenever `rateLimiterConfig` changes. */
+  private rateLimiter: QianfanRateLimiter | null
 
   constructor(private readonly config: QianfanAdapterOptions) {
     super()
-    const rl = config.options().rateLimit
+    this.syncRateLimiter()
+  }
+
+  /**
+   * Re-read the resolved rate-limit config (settings section merged over env)
+   * and rebuild the limiter only when it actually changed, so edits made in the
+   * plugin's settings card apply without restarting the process.
+   */
+  private syncRateLimiter(): void {
+    const next = this.config.options().rateLimit
+    if (sameRateLimitConfig(next, this.rateLimiterConfig)) return
+    this.rateLimiterConfig = next
     this.rateLimiter =
-      rl !== undefined && (rl.tpm > 0 || rl.rpm > 0)
-        ? new QianfanRateLimiter(rl)
+      next !== undefined && (next.tpm > 0 || next.rpm > 0)
+        ? new QianfanRateLimiter(next)
         : null
   }
 
@@ -257,6 +286,8 @@ export class QianfanAdapter extends LlmAdapter {
     const payload = JSON.stringify(body)
 
     // ═══ Layer 1 + 2: Pre-send estimation + token-bucket pacing ═══
+    // Re-sync the limiter first so settings-card edits apply immediately.
+    this.syncRateLimiter()
     if (this.rateLimiter !== null) {
       const estimatedTokens = QianfanRateLimiter.estimateTokens(
         payload.length,

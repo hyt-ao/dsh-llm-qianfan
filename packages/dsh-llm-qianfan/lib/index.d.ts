@@ -89,7 +89,8 @@ interface QianfanConnectionOptions {
   retryPolicy: import('@deepseek-ai/dsh-llm').ResolvedRetryPolicy;
   /**
    * Client-side TPM / RPM rate limiter configuration.
-   * Sourced exclusively from QIANFAN_RATE_LIMIT_* env vars.
+   * Resolved per field from the `rateLimit` settings section, falling back to
+   * `QIANFAN_RATE_LIMIT_*` env vars, then documented defaults.
    * `undefined` ⇒ limiter disabled.
    */
   rateLimit?: RateLimiterConfig;
@@ -107,9 +108,17 @@ declare const DEFAULT_MAX_TOKENS = 8192;
 declare const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300000;
 declare class QianfanAdapter extends LlmAdapter {
   private readonly config;
-  /** Shared rate limiter – one per adapter instance (per process). */
-  private readonly rateLimiter;
+  /** Effective rate-limit config this adapter is currently pacing with. */
+  private rateLimiterConfig;
+  /** Shared rate limiter – rebuilt lazily whenever `rateLimiterConfig` changes. */
+  private rateLimiter;
   constructor(config: QianfanAdapterOptions);
+  /**
+   * Re-read the resolved rate-limit config (settings section merged over env)
+   * and rebuild the limiter only when it actually changed, so edits made in the
+   * plugin's settings card apply without restarting the process.
+   */
+  private syncRateLimiter;
   providerInfo(provider: string): LlmProviderInfo;
   providerRetryPolicy(_provider: string): ResolvedRetryPolicy;
   listModels(provider: string): Promise<readonly LlmModelInfo[]>;
@@ -131,6 +140,12 @@ interface Config {
   retryPolicy?: RetryPolicyConfig;
   /** Provider-level default reasoning effort id (e.g. `high` / `max` / `off`). */
   reasoning?: QianfanDefaultReasoning;
+  /**
+   * Rate limiter quotas. Per-field precedence: settings > QIANFAN_RATE_LIMIT_* env > defaults.
+   * Omitted entirely (or both tpm and rpm ≤ 0) disables the limiter.
+   * Editable from the plugin's settings card; takes effect without a restart.
+   */
+  rateLimit?: Partial<RateLimiterConfig>;
 }
 declare const Config: z<Config>;
 declare const PUBLIC_BASE_URL = "https://qianfan.baidubce.com/v2";
